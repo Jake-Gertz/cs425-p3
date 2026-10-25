@@ -493,6 +493,637 @@ void test_cidr_subnet_whole_space(void) {
   assert_no_subnet(all, 0x80000000u, 0xFFFFFFFFu);
 }
 
+/* ------------------------------------------------------------------------
+ * Task 3 helpers
+ * --------------------------------------------------------------------- */
+
+/* tables/example.txt from the assignment */
+static const char example_table[] =
+  "# destination      gateway          device\n"
+  "default            132.178.227.1    eno1\n"
+  "132.178.227.0/25   direct           eno1\n"
+  "10.0.0.0/8         10.1.0.1         eth1\n"
+  "10.1.0.0/16        direct           eth1\n"
+  "10.1.2.0/24        direct           eth2\n"
+  "10.1.2.128/25      10.1.2.1         eth2   # a router behind eth2\n"
+  "192.168.0.0/16     10.1.0.1         eth1\n";
+
+/* the same seven routes, one per string */
+static const char *const example_routes[] = {
+  "default            132.178.227.1    eno1",
+  "132.178.227.0/25   direct           eno1",
+  "10.0.0.0/8         10.1.0.1         eth1",
+  "10.1.0.0/16        direct           eth1",
+  "10.1.2.0/24        direct           eth2",
+  "10.1.2.128/25      10.1.2.1         eth2",
+  "192.168.0.0/16     10.1.0.1         eth1",
+};
+
+static uint32_t ip(const char *text) {
+  uint32_t addr = 0;
+  TEST_ASSERT_TRUE_MESSAGE(ip_parse(text, &addr), text);
+  return addr;
+}
+
+static route_t route_of(const char *line) {
+  route_t route;
+  memset(&route, 0, sizeof route);
+  TEST_ASSERT_TRUE_MESSAGE(route_parse(line, &route), line);
+  return route;
+}
+
+/* A route built field by field, for cases route_parse() would refuse. */
+static route_t raw_route(uint32_t addr, uint8_t prefix, uint32_t gateway, const char *dev) {
+  route_t route;
+  memset(&route, 0, sizeof route);
+  route.dest.addr = addr;
+  route.dest.prefix = prefix;
+  route.gateway = gateway;
+  strncpy(route.dev, dev, DEV_NAME_LEN - 1);
+  return route;
+}
+
+static void assert_route(const route_t *route, const char *dest, const char *gateway,
+                         const char *dev) {
+  char text[CIDR_STR_LEN];
+  char gw[IP_STR_LEN];
+  TEST_ASSERT_NOT_NULL(route);
+  cidr_format(route->dest, text);
+  TEST_ASSERT_EQUAL_STRING(dest, text);
+  ip_format(route->gateway, gw);
+  TEST_ASSERT_EQUAL_STRING(gateway, gw);
+  TEST_ASSERT_EQUAL_STRING(dev, route->dev);
+}
+
+/* Parse a route line and check every field of the result. */
+static void assert_parsed(const char *line, const char *dest, const char *gateway,
+                          const char *dev) {
+  route_t route = route_of(line);
+  assert_route(&route, dest, gateway, dev);
+}
+
+static FILE *file_with(const char *content) {
+  FILE *file = tmpfile();
+  TEST_ASSERT_NOT_NULL(file);
+  fputs(content, file);
+  rewind(file);
+  return file;
+}
+
+static fwd_table_t *table_of(const char *const *lines, const size_t *order, size_t n) {
+  fwd_table_t *table = table_create();
+  TEST_ASSERT_NOT_NULL(table);
+  for (size_t k = 0; k < n; k++) {
+    route_t route = route_of(lines[order[k]]);
+    TEST_ASSERT_TRUE(table_add(table, &route));
+  }
+  TEST_ASSERT_EQUAL_size_t(n, table_count(table));
+  return table;
+}
+
+/* Every lookup the example table must answer, as "dest gateway dev". */
+static void assert_example_answers(const fwd_table_t *table) {
+  assert_route(table_lookup(table, ip("132.178.227.50")), "132.178.227.0/25", "0.0.0.0", "eno1");
+  assert_route(table_lookup(table, ip("8.8.8.8")), "0.0.0.0/0", "132.178.227.1", "eno1");
+  assert_route(table_lookup(table, ip("10.1.2.5")), "10.1.2.0/24", "0.0.0.0", "eth2");
+  assert_route(table_lookup(table, ip("10.1.2.200")), "10.1.2.128/25", "10.1.2.1", "eth2");
+  assert_route(table_lookup(table, ip("192.168.5.5")), "192.168.0.0/16", "10.1.0.1", "eth1");
+  assert_route(table_lookup(table, ip("10.200.0.1")), "10.0.0.0/8", "10.1.0.1", "eth1");
+  assert_route(table_lookup(table, ip("10.1.99.1")), "10.1.0.0/16", "0.0.0.0", "eth1");
+  assert_route(table_lookup(table, ip("132.178.227.200")), "0.0.0.0/0", "132.178.227.1", "eno1");
+  assert_route(table_lookup(table, ip("0.0.0.0")), "0.0.0.0/0", "132.178.227.1", "eno1");
+  assert_route(table_lookup(table, ip("255.255.255.255")), "0.0.0.0/0", "132.178.227.1", "eno1");
+}
+
+/* Rearrange order[] into the next lexicographic permutation; false after the last. */
+static bool next_permutation(size_t *order, size_t n) {
+  size_t i = n - 1;
+  while (i > 0 && order[i - 1] >= order[i]) {
+    i--;
+  }
+  if (i == 0) {
+    return false;
+  }
+  size_t j = n - 1;
+  while (order[j] <= order[i - 1]) {
+    j--;
+  }
+  size_t tmp = order[i - 1];
+  order[i - 1] = order[j];
+  order[j] = tmp;
+  for (size_t a = i, b = n - 1; a < b; a++, b--) {
+    tmp = order[a];
+    order[a] = order[b];
+    order[b] = tmp;
+  }
+  return true;
+}
+
+/* ------------------------------------------------------------------------
+ * route_parse
+ * --------------------------------------------------------------------- */
+
+void test_route_parse_example_lines(void) {
+  assert_parsed(example_routes[0], "0.0.0.0/0", "132.178.227.1", "eno1");
+  assert_parsed(example_routes[1], "132.178.227.0/25", "0.0.0.0", "eno1");
+  assert_parsed(example_routes[2], "10.0.0.0/8", "10.1.0.1", "eth1");
+  assert_parsed(example_routes[3], "10.1.0.0/16", "0.0.0.0", "eth1");
+  assert_parsed(example_routes[4], "10.1.2.0/24", "0.0.0.0", "eth2");
+  assert_parsed(example_routes[5], "10.1.2.128/25", "10.1.2.1", "eth2");
+  assert_parsed(example_routes[6], "192.168.0.0/16", "10.1.0.1", "eth1");
+}
+
+void test_route_parse_keywords(void) {
+  route_t route = route_of("default direct lo");
+  TEST_ASSERT_EQUAL_HEX32(0u, route.dest.addr);
+  TEST_ASSERT_EQUAL_UINT8(0, route.dest.prefix);
+  TEST_ASSERT_EQUAL_HEX32(0u, route.gateway);
+  TEST_ASSERT_EQUAL_STRING("lo", route.dev);
+  /* the literal forms mean the same thing */
+  assert_parsed("0.0.0.0/0 0.0.0.0 eth0", "0.0.0.0/0", "0.0.0.0", "eth0");
+  assert_parsed("10.0.0.0/31 10.0.0.1 p2p", "10.0.0.0/31", "10.0.0.1", "p2p");
+  assert_parsed("10.0.0.7/32 direct h", "10.0.0.7/32", "0.0.0.0", "h");
+  assert_parsed("255.255.255.255/32 255.255.255.255 x",
+                "255.255.255.255/32", "255.255.255.255", "x");
+}
+
+void test_route_parse_whitespace(void) {
+  assert_parsed("10.0.0.0/8\t\t10.1.0.1  \t eth1", "10.0.0.0/8", "10.1.0.1", "eth1");
+  assert_parsed("10.0.0.0/8 10.1.0.1 eth1\n", "10.0.0.0/8", "10.1.0.1", "eth1");
+  assert_parsed("10.0.0.0/8 10.1.0.1 eth1\r\n", "10.0.0.0/8", "10.1.0.1", "eth1");
+  assert_parsed("  \t10.0.0.0/8 10.1.0.1 eth1 \t ", "10.0.0.0/8", "10.1.0.1", "eth1");
+  assert_parsed("\v\f\r\n10.0.0.0/8 direct eth1\f\v", "10.0.0.0/8", "0.0.0.0", "eth1");
+}
+
+void test_route_parse_device_length(void) {
+  route_t route = route_of("default direct abcdefghijklmno"); /* 15 characters */
+  TEST_ASSERT_EQUAL_STRING("abcdefghijklmno", route.dev);
+  /* the unused part of dev is zero-filled */
+  for (size_t k = 15; k < DEV_NAME_LEN; k++) {
+    TEST_ASSERT_EQUAL_CHAR('\0', route.dev[k]);
+  }
+  route = route_of("default direct e");
+  for (size_t k = 1; k < DEV_NAME_LEN; k++) {
+    TEST_ASSERT_EQUAL_CHAR('\0', route.dev[k]);
+  }
+  route = route_of("default direct eno12399np0");
+  TEST_ASSERT_EQUAL_STRING("eno12399np0", route.dev);
+}
+
+void test_route_parse_rejects(void) {
+  static const char *const bad[] = {
+    "",
+    "   \t\r\n",
+    "default",
+    "default direct",
+    "default direct eth0 extra",
+    "10.0.0.0/8 direct eth1 # comment",
+    "default direct abcdefghijklmnop",            /* 16 character device */
+    "default direct abcdefghijklmnopqrstuvwxyz",  /* longer than any field */
+    "10.1.2.5/24 direct eth2",                    /* host bits set */
+    "0.0.0.1/0 direct eth2",                      /* host bits set in a /0 */
+    "10.0.0.0 direct eth0",                       /* no prefix */
+    "10.0.0.0/33 direct eth0",
+    "1.2.3/24 direct eth0",
+    "Default direct eth0",
+    "DEFAULT direct eth0",
+    "default Direct eth0",
+    "default directly eth0",
+    "default 1.2.3 eth0",
+    "default 256.1.1.1 eth0",
+    "default 010.0.0.1 eth0",
+    "default 1.2.3.4/32 eth0",
+    "default 1.2.3.4.5.6.7.8.9 eth0",
+    "255.255.255.255/32255 direct eth0",          /* too long for a destination */
+    "default\r1.2.3.4 eth0",                      /* only spaces and tabs separate */
+    "default \v1.2.3.4 eth0",
+    "default 1.2.3.4\n eth0",
+    "default 1.2.3.4 \feth0",
+  };
+  for (size_t k = 0; k < COUNT_OF(bad); k++) {
+    route_t route;
+    route_t before;
+    memset(&route, 0xAB, sizeof route);
+    before = route;
+    TEST_ASSERT_FALSE_MESSAGE(route_parse(bad[k], &route), bad[k]);
+    TEST_ASSERT_EQUAL_MEMORY_MESSAGE(&before, &route, sizeof route, bad[k]);
+  }
+}
+
+void test_route_parse_null(void) {
+  route_t route;
+  route_t before;
+  memset(&route, 0xAB, sizeof route);
+  before = route;
+  TEST_ASSERT_FALSE(route_parse(NULL, &route));
+  TEST_ASSERT_EQUAL_MEMORY(&before, &route, sizeof route);
+  TEST_ASSERT_FALSE(route_parse("default direct eth0", NULL));
+}
+
+/* ------------------------------------------------------------------------
+ * table_create / table_destroy / table_count
+ * --------------------------------------------------------------------- */
+
+void test_table_create_destroy_count(void) {
+  fwd_table_t *table = table_create();
+  TEST_ASSERT_NOT_NULL(table);
+  TEST_ASSERT_EQUAL_size_t(0, table_count(table));
+  TEST_ASSERT_NULL(table_lookup(table, ip("8.8.8.8")));
+  table_destroy(table);
+}
+
+void test_table_null(void) {
+  TEST_ASSERT_EQUAL_size_t(0, table_count(NULL));
+  table_destroy(NULL); /* allowed, does nothing */
+  TEST_ASSERT_NULL(table_lookup(NULL, 0u));
+}
+
+/* ------------------------------------------------------------------------
+ * table_add
+ * --------------------------------------------------------------------- */
+
+void test_table_add_null(void) {
+  fwd_table_t *table = table_create();
+  route_t route = route_of("default direct eth0");
+  TEST_ASSERT_FALSE(table_add(NULL, &route));
+  TEST_ASSERT_FALSE(table_add(table, NULL));
+  TEST_ASSERT_EQUAL_size_t(0, table_count(table));
+  table_destroy(table);
+}
+
+void test_table_add_rejects_host_bits(void) {
+  fwd_table_t *table = table_create();
+  route_t route = raw_route(0x0A010205u, 24, 0u, "eth2"); /* 10.1.2.5/24 */
+  TEST_ASSERT_FALSE(table_add(table, &route));
+  route = raw_route(0x00000001u, 0, 0u, "eth0"); /* 0.0.0.1/0 */
+  TEST_ASSERT_FALSE(table_add(table, &route));
+  TEST_ASSERT_EQUAL_size_t(0, table_count(table));
+  table_destroy(table);
+}
+
+void test_table_add_rejects_long_prefix(void) {
+  fwd_table_t *table = table_create();
+  route_t route = raw_route(0x0A000001u, 33, 0u, "eth0");
+  TEST_ASSERT_FALSE(table_add(table, &route));
+  route = raw_route(0u, 255, 0u, "eth0");
+  TEST_ASSERT_FALSE(table_add(table, &route));
+  TEST_ASSERT_EQUAL_size_t(0, table_count(table));
+  table_destroy(table);
+}
+
+void test_table_add_rejects_duplicate(void) {
+  fwd_table_t *table = table_create();
+  route_t first = route_of("10.0.0.0/8 10.1.0.1 eth1");
+  route_t again = route_of("10.0.0.0/8 10.9.9.9 eth9"); /* same block, other next hop */
+  route_t other_prefix = route_of("10.0.0.0/16 direct eth2");
+  TEST_ASSERT_TRUE(table_add(table, &first));
+  TEST_ASSERT_FALSE(table_add(table, &again));
+  TEST_ASSERT_FALSE(table_add(table, &first));
+  TEST_ASSERT_EQUAL_size_t(1, table_count(table));
+  /* the original route is still the one in the table */
+  assert_route(table_lookup(table, ip("10.200.0.1")), "10.0.0.0/8", "10.1.0.1", "eth1");
+  /* the same address with a different prefix is a different block */
+  TEST_ASSERT_TRUE(table_add(table, &other_prefix));
+  TEST_ASSERT_EQUAL_size_t(2, table_count(table));
+  /* a duplicate default route */
+  route_t def = route_of("default direct eth0");
+  route_t def2 = route_of("0.0.0.0/0 1.1.1.1 eth3");
+  TEST_ASSERT_TRUE(table_add(table, &def));
+  TEST_ASSERT_FALSE(table_add(table, &def2));
+  TEST_ASSERT_EQUAL_size_t(3, table_count(table));
+  table_destroy(table);
+}
+
+void test_table_add_copies_route(void) {
+  fwd_table_t *table = table_create();
+  route_t route = route_of("10.0.0.0/8 10.1.0.1 eth1");
+  TEST_ASSERT_TRUE(table_add(table, &route));
+  /* changing the caller's route afterwards does not change the table */
+  route.gateway = 0u;
+  strcpy(route.dev, "changed");
+  assert_route(table_lookup(table, ip("10.0.0.1")), "10.0.0.0/8", "10.1.0.1", "eth1");
+  table_destroy(table);
+}
+
+void test_table_add_terminates_device(void) {
+  fwd_table_t *table = table_create();
+  route_t route = raw_route(0x0A000000u, 8, 0u, "");
+  memset(route.dev, 'X', DEV_NAME_LEN); /* no terminator at all */
+  TEST_ASSERT_TRUE(table_add(table, &route));
+  const route_t *found = table_lookup(table, ip("10.0.0.1"));
+  TEST_ASSERT_NOT_NULL(found);
+  TEST_ASSERT_EQUAL_size_t(DEV_NAME_LEN - 1, strlen(found->dev));
+  /* an all-zero route (empty device name) is accepted */
+  route_t zero;
+  memset(&zero, 0, sizeof zero);
+  TEST_ASSERT_TRUE(table_add(table, &zero));
+  TEST_ASSERT_EQUAL_STRING("", table_lookup(table, ip("8.8.8.8"))->dev);
+  table_destroy(table);
+}
+
+void test_table_add_grows(void) {
+  fwd_table_t *table = table_create();
+  /* 100 routes forces the array to grow several times (8, 16, 32, 64, 128) */
+  for (uint32_t k = 0; k < 100; k++) {
+    route_t route = raw_route(0x0A000000u | (k << 8), 24, 0x0A000001u + k, "eth0");
+    TEST_ASSERT_TRUE(table_add(table, &route));
+    TEST_ASSERT_EQUAL_size_t(k + 1, table_count(table));
+  }
+  for (uint32_t k = 0; k < 100; k++) {
+    const route_t *found = table_lookup(table, 0x0A000063u | (k << 8));
+    TEST_ASSERT_NOT_NULL(found);
+    TEST_ASSERT_EQUAL_HEX32(0x0A000000u | (k << 8), found->dest.addr);
+    TEST_ASSERT_EQUAL_HEX32(0x0A000001u + k, found->gateway);
+  }
+  /* duplicates are still caught after the growth */
+  route_t dup = raw_route(0x0A003100u, 24, 0u, "eth0");
+  TEST_ASSERT_FALSE(table_add(table, &dup));
+  TEST_ASSERT_EQUAL_size_t(100, table_count(table));
+  table_destroy(table);
+}
+
+/* ------------------------------------------------------------------------
+ * table_load
+ * --------------------------------------------------------------------- */
+
+void test_table_load_example(void) {
+  fwd_table_t *table = table_create();
+  FILE *file = file_with(example_table);
+  size_t bad_line = 99;
+  TEST_ASSERT_TRUE(table_load(table, file, &bad_line));
+  TEST_ASSERT_EQUAL_size_t(0, bad_line);
+  TEST_ASSERT_EQUAL_size_t(7, table_count(table));
+  assert_example_answers(table);
+  fclose(file);
+  table_destroy(table);
+}
+
+void test_table_load_comments_and_blank_lines(void) {
+  fwd_table_t *table = table_create();
+  FILE *file = file_with("# only a comment\n"
+                         "\n"
+                         "   \t  \n"
+                         "\r\n"
+                         "#\n"
+                         "   # indented comment\n"
+                         "10.0.0.0/8 direct eth0 # trailing comment\n"
+                         "10.1.0.0/16 direct eth1# no space before it\n"
+                         "10.2.0.0/16 direct eth2#\n"
+                         "# 10.3.0.0/16 direct eth3\n");
+  size_t bad_line = 99;
+  TEST_ASSERT_TRUE(table_load(table, file, &bad_line));
+  TEST_ASSERT_EQUAL_size_t(0, bad_line);
+  TEST_ASSERT_EQUAL_size_t(3, table_count(table));
+  assert_route(table_lookup(table, ip("10.1.0.1")), "10.1.0.0/16", "0.0.0.0", "eth1");
+  assert_route(table_lookup(table, ip("10.2.0.1")), "10.2.0.0/16", "0.0.0.0", "eth2");
+  /* the commented out 10.3.0.0/16 was not loaded, so the /8 answers */
+  assert_route(table_lookup(table, ip("10.3.0.1")), "10.0.0.0/8", "0.0.0.0", "eth0");
+  fclose(file);
+  table_destroy(table);
+}
+
+void test_table_load_bad_line_in_middle(void) {
+  fwd_table_t *table = table_create();
+  FILE *file = file_with("default 132.178.227.1 eno1\n"
+                         "132.178.227.0/25 direct eno1\n"
+                         "10.0.0.0/8 10.1.0.1 eth1\n"
+                         "10.1.0.0/16 nowhere eth1\n"
+                         "10.1.2.0/24 direct eth2\n");
+  size_t bad_line = 99;
+  TEST_ASSERT_FALSE(table_load(table, file, &bad_line));
+  TEST_ASSERT_EQUAL_size_t(4, bad_line);
+  /* the three routes before the bad line stay in the table */
+  TEST_ASSERT_EQUAL_size_t(3, table_count(table));
+  assert_route(table_lookup(table, ip("10.1.2.5")), "10.0.0.0/8", "10.1.0.1", "eth1");
+  fclose(file);
+  table_destroy(table);
+}
+
+void test_table_load_line_numbers_count_every_line(void) {
+  fwd_table_t *table = table_create();
+  FILE *file = file_with("# comment\n"
+                         "\n"
+                         "10.0.0.0/8 direct eth0\n"
+                         "   \n"
+                         "10.1.2.5/24 direct eth2   # host bits\n"
+                         "10.2.0.0/16 direct eth2\n");
+  size_t bad_line = 0;
+  TEST_ASSERT_FALSE(table_load(table, file, &bad_line));
+  TEST_ASSERT_EQUAL_size_t(5, bad_line);
+  TEST_ASSERT_EQUAL_size_t(1, table_count(table));
+  fclose(file);
+  table_destroy(table);
+}
+
+void test_table_load_duplicate_line(void) {
+  fwd_table_t *table = table_create();
+  FILE *file = file_with("10.0.0.0/8 direct eth0\n"
+                         "10.0.0.0/16 direct eth0\n"
+                         "10.0.0.0/8 10.1.1.1 eth1\n");
+  size_t bad_line = 0;
+  TEST_ASSERT_FALSE(table_load(table, file, &bad_line));
+  TEST_ASSERT_EQUAL_size_t(3, bad_line);
+  TEST_ASSERT_EQUAL_size_t(2, table_count(table));
+  fclose(file);
+  table_destroy(table);
+}
+
+void test_table_load_duplicate_of_existing_route(void) {
+  fwd_table_t *table = table_create();
+  route_t route = route_of("default direct eth0");
+  TEST_ASSERT_TRUE(table_add(table, &route));
+  FILE *file = file_with("10.0.0.0/8 direct eth0\n"
+                         "default 1.1.1.1 eth1\n");
+  size_t bad_line = 0;
+  TEST_ASSERT_FALSE(table_load(table, file, &bad_line));
+  TEST_ASSERT_EQUAL_size_t(2, bad_line);
+  TEST_ASSERT_EQUAL_size_t(2, table_count(table));
+  fclose(file);
+  table_destroy(table);
+}
+
+void test_table_load_first_line_bad(void) {
+  fwd_table_t *table = table_create();
+  FILE *file = file_with("not a route\n10.0.0.0/8 direct eth0\n");
+  size_t bad_line = 0;
+  TEST_ASSERT_FALSE(table_load(table, file, &bad_line));
+  TEST_ASSERT_EQUAL_size_t(1, bad_line);
+  TEST_ASSERT_EQUAL_size_t(0, table_count(table));
+  fclose(file);
+  table_destroy(table);
+}
+
+void test_table_load_null_arguments(void) {
+  fwd_table_t *table = table_create();
+  FILE *file = file_with(example_table);
+  size_t bad_line = 99;
+  TEST_ASSERT_FALSE(table_load(NULL, file, &bad_line));
+  TEST_ASSERT_EQUAL_size_t(0, bad_line);
+  bad_line = 99;
+  TEST_ASSERT_FALSE(table_load(table, NULL, &bad_line));
+  TEST_ASSERT_EQUAL_size_t(0, bad_line);
+  TEST_ASSERT_FALSE(table_load(NULL, NULL, NULL));
+  TEST_ASSERT_EQUAL_size_t(0, table_count(table));
+  fclose(file);
+  table_destroy(table);
+}
+
+void test_table_load_null_bad_line(void) {
+  fwd_table_t *table = table_create();
+  FILE *good = file_with(example_table);
+  FILE *bad = file_with("10.9.0.0/16 direct eth0\nbogus\n");
+  TEST_ASSERT_TRUE(table_load(table, good, NULL));
+  TEST_ASSERT_EQUAL_size_t(7, table_count(table));
+  TEST_ASSERT_FALSE(table_load(table, bad, NULL));
+  TEST_ASSERT_EQUAL_size_t(8, table_count(table));
+  fclose(good);
+  fclose(bad);
+  table_destroy(table);
+}
+
+void test_table_load_read_error(void) {
+  fwd_table_t *table = table_create();
+  /* a stream opened only for writing can not be read, so getline fails with ferror set */
+  FILE *file = fopen("/dev/null", "w");
+  TEST_ASSERT_NOT_NULL(file);
+  size_t bad_line = 99;
+  TEST_ASSERT_FALSE(table_load(table, file, &bad_line));
+  TEST_ASSERT_EQUAL_size_t(0, bad_line);
+  TEST_ASSERT_EQUAL_size_t(0, table_count(table));
+  fclose(file);
+  table_destroy(table);
+}
+
+void test_table_load_empty_and_odd_files(void) {
+  fwd_table_t *table = table_create();
+  FILE *empty = file_with("");
+  size_t bad_line = 99;
+  TEST_ASSERT_TRUE(table_load(table, empty, &bad_line));
+  TEST_ASSERT_EQUAL_size_t(0, bad_line);
+  TEST_ASSERT_EQUAL_size_t(0, table_count(table));
+  fclose(empty);
+
+  /* CRLF line endings and no newline at the end of the last line */
+  FILE *crlf = file_with("# windows file\r\n"
+                         "default 132.178.227.1 eno1\r\n"
+                         "\r\n"
+                         "10.0.0.0/8 10.1.0.1 eth1");
+  TEST_ASSERT_TRUE(table_load(table, crlf, &bad_line));
+  TEST_ASSERT_EQUAL_size_t(2, table_count(table));
+  assert_route(table_lookup(table, ip("10.0.0.1")), "10.0.0.0/8", "10.1.0.1", "eth1");
+  fclose(crlf);
+
+  /* a line far longer than getline's first buffer */
+  char long_line[600];
+  memset(long_line, ' ', sizeof long_line);
+  strcpy(long_line + 500, "192.168.0.0/16 direct eth5\n");
+  FILE *wide = file_with(long_line);
+  TEST_ASSERT_TRUE(table_load(table, wide, &bad_line));
+  TEST_ASSERT_EQUAL_size_t(3, table_count(table));
+  fclose(wide);
+  table_destroy(table);
+}
+
+/* ------------------------------------------------------------------------
+ * table_lookup
+ * --------------------------------------------------------------------- */
+
+void test_table_lookup_longest_of_several(void) {
+  /* 10.1.2.200 is inside all four blocks and the /25 wins */
+  static const char *const nested[] = {
+    "10.0.0.0/8 10.1.0.1 eth1",
+    "10.1.0.0/16 direct eth1",
+    "10.1.2.0/24 direct eth2",
+    "10.1.2.128/25 10.1.2.1 eth2",
+  };
+  size_t order[] = {0, 1, 2, 3};
+  fwd_table_t *table = table_of(nested, order, 4);
+  assert_route(table_lookup(table, ip("10.1.2.200")), "10.1.2.128/25", "10.1.2.1", "eth2");
+  assert_route(table_lookup(table, ip("10.1.2.127")), "10.1.2.0/24", "0.0.0.0", "eth2");
+  assert_route(table_lookup(table, ip("10.1.3.1")), "10.1.0.0/16", "0.0.0.0", "eth1");
+  assert_route(table_lookup(table, ip("10.2.0.0")), "10.0.0.0/8", "10.1.0.1", "eth1");
+  /* no default route, so an address outside every block matches nothing */
+  TEST_ASSERT_NULL(table_lookup(table, ip("11.0.0.0")));
+  TEST_ASSERT_NULL(table_lookup(table, ip("9.255.255.255")));
+  table_destroy(table);
+}
+
+void test_table_lookup_independent_of_order(void) {
+  size_t order[COUNT_OF(example_routes)];
+  size_t permutations = 0;
+  for (size_t k = 0; k < COUNT_OF(order); k++) {
+    order[k] = k;
+  }
+  /* every one of the 7! = 5040 orders gives the same answers */
+  do {
+    fwd_table_t *table = table_of(example_routes, order, COUNT_OF(order));
+    assert_example_answers(table);
+    table_destroy(table);
+    permutations++;
+  } while (next_permutation(order, COUNT_OF(order)));
+  TEST_ASSERT_EQUAL_size_t(5040, permutations);
+}
+
+void test_table_lookup_reverse_and_shuffled(void) {
+  size_t reverse[] = {6, 5, 4, 3, 2, 1, 0};
+  size_t shuffled[] = {5, 0, 3, 6, 1, 4, 2};
+  fwd_table_t *table = table_of(example_routes, reverse, 7);
+  assert_example_answers(table);
+  table_destroy(table);
+  table = table_of(example_routes, shuffled, 7);
+  assert_example_answers(table);
+  table_destroy(table);
+}
+
+void test_table_lookup_no_default_route(void) {
+  size_t order[] = {1, 2, 3, 4, 5, 6}; /* everything but the default */
+  fwd_table_t *table = table_of(example_routes, order, 6);
+  TEST_ASSERT_NULL(table_lookup(table, ip("8.8.8.8")));
+  TEST_ASSERT_NULL(table_lookup(table, ip("132.178.227.200")));
+  TEST_ASSERT_NULL(table_lookup(table, ip("0.0.0.0")));
+  TEST_ASSERT_NULL(table_lookup(table, ip("255.255.255.255")));
+  assert_route(table_lookup(table, ip("10.1.2.200")), "10.1.2.128/25", "10.1.2.1", "eth2");
+  assert_route(table_lookup(table, ip("132.178.227.50")), "132.178.227.0/25", "0.0.0.0", "eno1");
+  table_destroy(table);
+}
+
+void test_table_lookup_default_only_as_last_resort(void) {
+  fwd_table_t *table = table_create();
+  route_t def = route_of("default 132.178.227.1 eno1");
+  TEST_ASSERT_TRUE(table_add(table, &def));
+  /* alone, the default route matches everything */
+  assert_route(table_lookup(table, 0u), "0.0.0.0/0", "132.178.227.1", "eno1");
+  assert_route(table_lookup(table, 0xFFFFFFFFu), "0.0.0.0/0", "132.178.227.1", "eno1");
+  assert_route(table_lookup(table, ip("10.1.2.3")), "0.0.0.0/0", "132.178.227.1", "eno1");
+  /* once something more specific exists, it loses to that */
+  route_t net = route_of("10.0.0.0/8 direct eth1");
+  TEST_ASSERT_TRUE(table_add(table, &net));
+  assert_route(table_lookup(table, ip("10.1.2.3")), "10.0.0.0/8", "0.0.0.0", "eth1");
+  assert_route(table_lookup(table, ip("11.0.0.0")), "0.0.0.0/0", "132.178.227.1", "eno1");
+  table_destroy(table);
+}
+
+void test_table_lookup_host_and_point_to_point_routes(void) {
+  fwd_table_t *table = table_create();
+  FILE *file = file_with(example_table);
+  TEST_ASSERT_TRUE(table_load(table, file, NULL));
+  fclose(file);
+  route_t host = route_of("10.1.2.200/32 10.1.2.2 eth3");
+  route_t p2p = route_of("10.1.2.250/31 direct ppp0");
+  route_t top = route_of("255.255.255.255/32 direct bcast");
+  TEST_ASSERT_TRUE(table_add(table, &host));
+  TEST_ASSERT_TRUE(table_add(table, &p2p));
+  TEST_ASSERT_TRUE(table_add(table, &top));
+  assert_route(table_lookup(table, ip("10.1.2.200")), "10.1.2.200/32", "10.1.2.2", "eth3");
+  assert_route(table_lookup(table, ip("10.1.2.201")), "10.1.2.128/25", "10.1.2.1", "eth2");
+  assert_route(table_lookup(table, ip("10.1.2.250")), "10.1.2.250/31", "0.0.0.0", "ppp0");
+  assert_route(table_lookup(table, ip("10.1.2.251")), "10.1.2.250/31", "0.0.0.0", "ppp0");
+  assert_route(table_lookup(table, ip("10.1.2.252")), "10.1.2.128/25", "10.1.2.1", "eth2");
+  assert_route(table_lookup(table, ip("255.255.255.255")), "255.255.255.255/32", "0.0.0.0", "bcast");
+  assert_route(table_lookup(table, ip("255.255.255.254")), "0.0.0.0/0", "132.178.227.1", "eno1");
+  table_destroy(table);
+}
+
 int main(void) {
   UNITY_BEGIN();
   /* Task 1 */
@@ -527,5 +1158,38 @@ int main(void) {
   RUN_TEST(test_cidr_subnet_prefix_limit);
   RUN_TEST(test_cidr_subnet_null_out);
   RUN_TEST(test_cidr_subnet_whole_space);
+  /* Task 3 */
+  RUN_TEST(test_route_parse_example_lines);
+  RUN_TEST(test_route_parse_keywords);
+  RUN_TEST(test_route_parse_whitespace);
+  RUN_TEST(test_route_parse_device_length);
+  RUN_TEST(test_route_parse_rejects);
+  RUN_TEST(test_route_parse_null);
+  RUN_TEST(test_table_create_destroy_count);
+  RUN_TEST(test_table_null);
+  RUN_TEST(test_table_add_null);
+  RUN_TEST(test_table_add_rejects_host_bits);
+  RUN_TEST(test_table_add_rejects_long_prefix);
+  RUN_TEST(test_table_add_rejects_duplicate);
+  RUN_TEST(test_table_add_copies_route);
+  RUN_TEST(test_table_add_terminates_device);
+  RUN_TEST(test_table_add_grows);
+  RUN_TEST(test_table_load_example);
+  RUN_TEST(test_table_load_comments_and_blank_lines);
+  RUN_TEST(test_table_load_bad_line_in_middle);
+  RUN_TEST(test_table_load_line_numbers_count_every_line);
+  RUN_TEST(test_table_load_duplicate_line);
+  RUN_TEST(test_table_load_duplicate_of_existing_route);
+  RUN_TEST(test_table_load_first_line_bad);
+  RUN_TEST(test_table_load_null_arguments);
+  RUN_TEST(test_table_load_null_bad_line);
+  RUN_TEST(test_table_load_read_error);
+  RUN_TEST(test_table_load_empty_and_odd_files);
+  RUN_TEST(test_table_lookup_longest_of_several);
+  RUN_TEST(test_table_lookup_independent_of_order);
+  RUN_TEST(test_table_lookup_reverse_and_shuffled);
+  RUN_TEST(test_table_lookup_no_default_route);
+  RUN_TEST(test_table_lookup_default_only_as_last_resort);
+  RUN_TEST(test_table_lookup_host_and_point_to_point_routes);
   return UNITY_END();
 }
