@@ -207,6 +207,292 @@ void test_cidr_format_round_trip(void) {
   }
 }
 
+/* ------------------------------------------------------------------------
+ * cidr_mask
+ * --------------------------------------------------------------------- */
+
+void test_cidr_mask_boundaries(void) {
+  TEST_ASSERT_EQUAL_HEX32(0x00000000u, cidr_mask(0));
+  TEST_ASSERT_EQUAL_HEX32(0x80000000u, cidr_mask(1));
+  TEST_ASSERT_EQUAL_HEX32(0xFF000000u, cidr_mask(8));
+  TEST_ASSERT_EQUAL_HEX32(0xFFFFFF00u, cidr_mask(24));
+  TEST_ASSERT_EQUAL_HEX32(0xFFFFFF80u, cidr_mask(25));
+  TEST_ASSERT_EQUAL_HEX32(0xFFFFFFFCu, cidr_mask(30));
+  TEST_ASSERT_EQUAL_HEX32(0xFFFFFFFEu, cidr_mask(31));
+  TEST_ASSERT_EQUAL_HEX32(0xFFFFFFFFu, cidr_mask(32));
+  TEST_ASSERT_EQUAL_HEX32(0xFFFFFFFFu, cidr_mask(33));
+  TEST_ASSERT_EQUAL_HEX32(0xFFFFFFFFu, cidr_mask(255));
+}
+
+void test_cidr_mask_every_prefix(void) {
+  for (unsigned p = 0; p <= 32; p++) {
+    /* the same mask computed a different way: p ones then 32 - p zeros */
+    uint32_t expected = (uint32_t)(((uint64_t)0xFFFFFFFFu << (32u - p)) & 0xFFFFFFFFu);
+    TEST_ASSERT_EQUAL_HEX32(expected, cidr_mask((uint8_t)p));
+  }
+}
+
+/* ------------------------------------------------------------------------
+ * cidr_network / cidr_broadcast
+ * --------------------------------------------------------------------- */
+
+void test_cidr_network_broadcast_pdf_example(void) {
+  cidr_t onyx = {0x84B2E30Bu, 25}; /* 132.178.227.11/25 */
+  TEST_ASSERT_EQUAL_HEX32(0x84B2E300u, cidr_network(onyx));   /* .0 */
+  TEST_ASSERT_EQUAL_HEX32(0x84B2E37Fu, cidr_broadcast(onyx)); /* .127 */
+}
+
+void test_cidr_network_broadcast_boundaries(void) {
+  cidr_t all = {0x01020304u, 0};
+  TEST_ASSERT_EQUAL_HEX32(0x00000000u, cidr_network(all));
+  TEST_ASSERT_EQUAL_HEX32(0xFFFFFFFFu, cidr_broadcast(all));
+
+  cidr_t p2p = {0x0A000001u, 31}; /* 10.0.0.1/31 */
+  TEST_ASSERT_EQUAL_HEX32(0x0A000000u, cidr_network(p2p));
+  TEST_ASSERT_EQUAL_HEX32(0x0A000001u, cidr_broadcast(p2p));
+
+  cidr_t host = {0x0A000001u, 32};
+  TEST_ASSERT_EQUAL_HEX32(0x0A000001u, cidr_network(host));
+  TEST_ASSERT_EQUAL_HEX32(0x0A000001u, cidr_broadcast(host));
+
+  cidr_t top = {0xFFFFFFFFu, 32};
+  TEST_ASSERT_EQUAL_HEX32(0xFFFFFFFFu, cidr_network(top));
+  TEST_ASSERT_EQUAL_HEX32(0xFFFFFFFFu, cidr_broadcast(top));
+
+  cidr_t too_long = {0x0A000001u, 40}; /* treated as /32 */
+  TEST_ASSERT_EQUAL_HEX32(0x0A000001u, cidr_network(too_long));
+  TEST_ASSERT_EQUAL_HEX32(0x0A000001u, cidr_broadcast(too_long));
+}
+
+/* ------------------------------------------------------------------------
+ * cidr_first_host / cidr_last_host
+ * --------------------------------------------------------------------- */
+
+void test_cidr_host_range_pdf_example(void) {
+  cidr_t onyx = {0x84B2E30Bu, 25};
+  TEST_ASSERT_EQUAL_HEX32(0x84B2E301u, cidr_first_host(onyx)); /* .1 */
+  TEST_ASSERT_EQUAL_HEX32(0x84B2E37Eu, cidr_last_host(onyx));  /* .126 */
+}
+
+void test_cidr_host_range_boundaries(void) {
+  cidr_t all = {0u, 0};
+  TEST_ASSERT_EQUAL_HEX32(0x00000001u, cidr_first_host(all)); /* 0.0.0.1 */
+  TEST_ASSERT_EQUAL_HEX32(0xFFFFFFFEu, cidr_last_host(all));  /* 255.255.255.254 */
+
+  cidr_t p30 = {0x0A000000u, 30};
+  TEST_ASSERT_EQUAL_HEX32(0x0A000001u, cidr_first_host(p30));
+  TEST_ASSERT_EQUAL_HEX32(0x0A000002u, cidr_last_host(p30));
+
+  cidr_t p2p = {0x0A000001u, 31}; /* RFC 3021: both addresses are hosts */
+  TEST_ASSERT_EQUAL_HEX32(0x0A000000u, cidr_first_host(p2p));
+  TEST_ASSERT_EQUAL_HEX32(0x0A000001u, cidr_last_host(p2p));
+
+  cidr_t host = {0x0A000001u, 32};
+  TEST_ASSERT_EQUAL_HEX32(0x0A000001u, cidr_first_host(host));
+  TEST_ASSERT_EQUAL_HEX32(0x0A000001u, cidr_last_host(host));
+
+  cidr_t bottom = {0u, 32};
+  TEST_ASSERT_EQUAL_HEX32(0u, cidr_first_host(bottom));
+  TEST_ASSERT_EQUAL_HEX32(0u, cidr_last_host(bottom));
+
+  cidr_t top = {0xFFFFFFFFu, 32};
+  TEST_ASSERT_EQUAL_HEX32(0xFFFFFFFFu, cidr_first_host(top));
+  TEST_ASSERT_EQUAL_HEX32(0xFFFFFFFFu, cidr_last_host(top));
+
+  cidr_t top31 = {0xFFFFFFFEu, 31};
+  TEST_ASSERT_EQUAL_HEX32(0xFFFFFFFEu, cidr_first_host(top31));
+  TEST_ASSERT_EQUAL_HEX32(0xFFFFFFFFu, cidr_last_host(top31));
+
+  cidr_t too_long = {0x0A000001u, 40}; /* treated as /32 */
+  TEST_ASSERT_EQUAL_HEX32(0x0A000001u, cidr_first_host(too_long));
+  TEST_ASSERT_EQUAL_HEX32(0x0A000001u, cidr_last_host(too_long));
+}
+
+/* ------------------------------------------------------------------------
+ * cidr_host_count
+ * --------------------------------------------------------------------- */
+
+void test_cidr_host_count(void) {
+  cidr_t b = {0u, 0};
+  TEST_ASSERT_EQUAL_UINT64(4294967294ull, cidr_host_count(b));
+  b.prefix = 1;
+  TEST_ASSERT_EQUAL_UINT64(2147483646ull, cidr_host_count(b));
+  b.prefix = 8;
+  TEST_ASSERT_EQUAL_UINT64(16777214ull, cidr_host_count(b));
+  b.prefix = 24;
+  TEST_ASSERT_EQUAL_UINT64(254ull, cidr_host_count(b));
+  b.prefix = 25;
+  TEST_ASSERT_EQUAL_UINT64(126ull, cidr_host_count(b));
+  b.prefix = 30;
+  TEST_ASSERT_EQUAL_UINT64(2ull, cidr_host_count(b));
+  b.prefix = 31;
+  TEST_ASSERT_EQUAL_UINT64(2ull, cidr_host_count(b));
+  b.prefix = 32;
+  TEST_ASSERT_EQUAL_UINT64(1ull, cidr_host_count(b));
+  b.prefix = 33;
+  TEST_ASSERT_EQUAL_UINT64(1ull, cidr_host_count(b));
+  b.prefix = 255;
+  TEST_ASSERT_EQUAL_UINT64(1ull, cidr_host_count(b));
+}
+
+void test_cidr_host_count_matches_range(void) {
+  /* for /0 to /30 the count is exactly last - first + 1 */
+  for (unsigned p = 0; p <= 30; p++) {
+    cidr_t b = {0x0A000000u & cidr_mask((uint8_t)p), (uint8_t)p};
+    uint64_t span = (uint64_t)cidr_last_host(b) - cidr_first_host(b) + 1u;
+    TEST_ASSERT_EQUAL_UINT64(span, cidr_host_count(b));
+  }
+}
+
+/* ------------------------------------------------------------------------
+ * cidr_contains
+ * --------------------------------------------------------------------- */
+
+void test_cidr_contains_pdf_example(void) {
+  cidr_t onyx = {0x84B2E30Bu, 25};
+  TEST_ASSERT_TRUE(cidr_contains(onyx, 0x84B2E332u));  /* .50 */
+  TEST_ASSERT_FALSE(cidr_contains(onyx, 0x84B2E3C8u)); /* .200 */
+  TEST_ASSERT_TRUE(cidr_contains(onyx, 0x84B2E300u));  /* first address .0 */
+  TEST_ASSERT_TRUE(cidr_contains(onyx, 0x84B2E37Fu));  /* last address .127 */
+  TEST_ASSERT_FALSE(cidr_contains(onyx, 0x84B2E380u)); /* .128, just past */
+  TEST_ASSERT_FALSE(cidr_contains(onyx, 0x84B2E2FFu)); /* 132.178.226.255, just before */
+}
+
+void test_cidr_contains_boundaries(void) {
+  cidr_t all = {0u, 0};
+  TEST_ASSERT_TRUE(cidr_contains(all, 0u));
+  TEST_ASSERT_TRUE(cidr_contains(all, 0xFFFFFFFFu));
+  TEST_ASSERT_TRUE(cidr_contains(all, 0x08080808u));
+
+  cidr_t all_host_bits = {0x01020304u, 0}; /* /0 still contains everything */
+  TEST_ASSERT_TRUE(cidr_contains(all_host_bits, 0u));
+  TEST_ASSERT_TRUE(cidr_contains(all_host_bits, 0xFFFFFFFFu));
+
+  cidr_t host = {0x0A000001u, 32};
+  TEST_ASSERT_TRUE(cidr_contains(host, 0x0A000001u));
+  TEST_ASSERT_FALSE(cidr_contains(host, 0x0A000000u));
+  TEST_ASSERT_FALSE(cidr_contains(host, 0x0A000002u));
+
+  cidr_t p2p = {0x0A000000u, 31};
+  TEST_ASSERT_TRUE(cidr_contains(p2p, 0x0A000000u));
+  TEST_ASSERT_TRUE(cidr_contains(p2p, 0x0A000001u));
+  TEST_ASSERT_FALSE(cidr_contains(p2p, 0x0A000002u));
+
+  cidr_t top = {0xFFFFFFFFu, 32};
+  TEST_ASSERT_TRUE(cidr_contains(top, 0xFFFFFFFFu));
+  TEST_ASSERT_FALSE(cidr_contains(top, 0xFFFFFFFEu));
+}
+
+/* ------------------------------------------------------------------------
+ * cidr_is_network
+ * --------------------------------------------------------------------- */
+
+void test_cidr_is_network(void) {
+  cidr_t net = {0xC0A80100u, 24};    /* 192.168.1.0/24 */
+  cidr_t iface = {0xC0A80105u, 24};  /* 192.168.1.5/24 */
+  cidr_t all = {0u, 0};
+  cidr_t all_bad = {0x01000000u, 0};
+  cidr_t p2p_net = {0x0A000000u, 31};
+  cidr_t p2p_bad = {0x0A000001u, 31};
+  cidr_t host = {0x0A000001u, 32};
+  cidr_t top = {0xFFFFFFFFu, 32};
+  cidr_t too_long = {0x0A000001u, 40};
+  TEST_ASSERT_TRUE(cidr_is_network(net));
+  TEST_ASSERT_FALSE(cidr_is_network(iface));
+  TEST_ASSERT_TRUE(cidr_is_network(all));
+  TEST_ASSERT_FALSE(cidr_is_network(all_bad));
+  TEST_ASSERT_TRUE(cidr_is_network(p2p_net));
+  TEST_ASSERT_FALSE(cidr_is_network(p2p_bad));
+  TEST_ASSERT_TRUE(cidr_is_network(host)); /* a /32 is always a network */
+  TEST_ASSERT_TRUE(cidr_is_network(top));
+  TEST_ASSERT_TRUE(cidr_is_network(too_long));
+}
+
+/* ------------------------------------------------------------------------
+ * cidr_subnet
+ * --------------------------------------------------------------------- */
+
+static void assert_subnet(cidr_t block, uint32_t n, uint32_t i, const char *expected) {
+  cidr_t sub = {0, 0};
+  char out[CIDR_STR_LEN];
+  TEST_ASSERT_TRUE_MESSAGE(cidr_subnet(block, n, i, &sub), expected);
+  cidr_format(sub, out);
+  TEST_ASSERT_EQUAL_STRING(expected, out);
+}
+
+static void assert_no_subnet(cidr_t block, uint32_t n, uint32_t i) {
+  cidr_t sub = {SENTINEL_ADDR, 77};
+  TEST_ASSERT_FALSE(cidr_subnet(block, n, i, &sub));
+  TEST_ASSERT_EQUAL_HEX32(SENTINEL_ADDR, sub.addr); /* untouched on failure */
+  TEST_ASSERT_EQUAL_UINT8(77, sub.prefix);
+}
+
+void test_cidr_subnet_split_24_into_4(void) {
+  cidr_t net = {0xC0A80100u, 24};
+  assert_subnet(net, 4, 0, "192.168.1.0/26");
+  assert_subnet(net, 4, 1, "192.168.1.64/26");
+  assert_subnet(net, 4, 2, "192.168.1.128/26");
+  assert_subnet(net, 4, 3, "192.168.1.192/26");
+  assert_no_subnet(net, 4, 4);
+  assert_no_subnet(net, 4, 0xFFFFFFFFu);
+}
+
+void test_cidr_subnet_one_piece_is_the_block(void) {
+  cidr_t net = {0xC0A80100u, 24};
+  assert_subnet(net, 1, 0, "192.168.1.0/24");
+  assert_no_subnet(net, 1, 1);
+  cidr_t all = {0u, 0};
+  assert_subnet(all, 1, 0, "0.0.0.0/0");
+  cidr_t host = {0x0A000001u, 32};
+  assert_subnet(host, 1, 0, "10.0.0.1/32");
+}
+
+void test_cidr_subnet_rejects_bad_count(void) {
+  cidr_t net = {0xC0A80100u, 24};
+  assert_no_subnet(net, 0, 0);
+  assert_no_subnet(net, 3, 0);
+  assert_no_subnet(net, 6, 0);
+  assert_no_subnet(net, 255, 0);
+  assert_no_subnet(net, 0x80000001u, 0);
+  assert_no_subnet(net, 0xFFFFFFFFu, 0);
+}
+
+void test_cidr_subnet_rejects_non_network(void) {
+  cidr_t iface = {0xC0A80105u, 24}; /* 192.168.1.5/24 */
+  assert_no_subnet(iface, 4, 0);
+  assert_no_subnet(iface, 1, 0);
+}
+
+void test_cidr_subnet_prefix_limit(void) {
+  cidr_t p30 = {0x0A000000u, 30};
+  assert_subnet(p30, 4, 0, "10.0.0.0/32");
+  assert_subnet(p30, 4, 3, "10.0.0.3/32");
+  assert_no_subnet(p30, 8, 0); /* would need /33 */
+  cidr_t host = {0x0A000001u, 32};
+  assert_no_subnet(host, 2, 0);
+  cidr_t net = {0xC0A80100u, 24};
+  assert_subnet(net, 256, 255, "192.168.1.255/32");
+  assert_no_subnet(net, 512, 0);
+  assert_no_subnet(net, 0x80000000u, 0);
+}
+
+void test_cidr_subnet_null_out(void) {
+  cidr_t net = {0xC0A80100u, 24};
+  TEST_ASSERT_FALSE(cidr_subnet(net, 4, 0, NULL));
+}
+
+void test_cidr_subnet_whole_space(void) {
+  cidr_t all = {0u, 0};
+  assert_subnet(all, 2, 0, "0.0.0.0/1");
+  assert_subnet(all, 2, 1, "128.0.0.0/1");
+  /* 2^31 pieces is legal and gives /31s */
+  assert_subnet(all, 0x80000000u, 0, "0.0.0.0/31");
+  assert_subnet(all, 0x80000000u, 1, "0.0.0.2/31");
+  assert_subnet(all, 0x80000000u, 0x7FFFFFFFu, "255.255.255.254/31");
+  assert_no_subnet(all, 0x80000000u, 0x80000000u);
+  assert_no_subnet(all, 0x80000000u, 0xFFFFFFFFu);
+}
+
 int main(void) {
   UNITY_BEGIN();
   /* Task 1 */
@@ -222,5 +508,24 @@ int main(void) {
   RUN_TEST(test_cidr_parse_null);
   RUN_TEST(test_cidr_format);
   RUN_TEST(test_cidr_format_round_trip);
+  /* Task 2 */
+  RUN_TEST(test_cidr_mask_boundaries);
+  RUN_TEST(test_cidr_mask_every_prefix);
+  RUN_TEST(test_cidr_network_broadcast_pdf_example);
+  RUN_TEST(test_cidr_network_broadcast_boundaries);
+  RUN_TEST(test_cidr_host_range_pdf_example);
+  RUN_TEST(test_cidr_host_range_boundaries);
+  RUN_TEST(test_cidr_host_count);
+  RUN_TEST(test_cidr_host_count_matches_range);
+  RUN_TEST(test_cidr_contains_pdf_example);
+  RUN_TEST(test_cidr_contains_boundaries);
+  RUN_TEST(test_cidr_is_network);
+  RUN_TEST(test_cidr_subnet_split_24_into_4);
+  RUN_TEST(test_cidr_subnet_one_piece_is_the_block);
+  RUN_TEST(test_cidr_subnet_rejects_bad_count);
+  RUN_TEST(test_cidr_subnet_rejects_non_network);
+  RUN_TEST(test_cidr_subnet_prefix_limit);
+  RUN_TEST(test_cidr_subnet_null_out);
+  RUN_TEST(test_cidr_subnet_whole_space);
   return UNITY_END();
 }

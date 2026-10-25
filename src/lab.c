@@ -136,3 +136,98 @@ void cidr_format(cidr_t block, char out[CIDR_STR_LEN])
            (unsigned)((addr >> 8) & 0xFFu), (unsigned)(addr & 0xFFu),
            clamp_prefix(block.prefix));
 }
+
+/* ------------------------------------------------------------------------
+ * Task 2 - Subnet arithmetic
+ * --------------------------------------------------------------------- */
+
+uint32_t cidr_mask(uint8_t prefix)
+{
+  unsigned p = clamp_prefix(prefix);
+
+  /* Shifting a 32 bit value by 32 is undefined, so /0 is its own case. */
+  return p == 0 ? 0u : (uint32_t)(0xFFFFFFFFu << (32u - p));
+}
+
+uint32_t cidr_network(cidr_t block)
+{
+  return block.addr & cidr_mask(block.prefix);
+}
+
+uint32_t cidr_broadcast(cidr_t block)
+{
+  return block.addr | ~cidr_mask(block.prefix);
+}
+
+uint32_t cidr_first_host(cidr_t block)
+{
+  uint32_t network = cidr_network(block);
+
+  /* /31 (RFC 3021) and /32 have no network address to skip. */
+  return clamp_prefix(block.prefix) >= 31 ? network : network + 1u;
+}
+
+uint32_t cidr_last_host(cidr_t block)
+{
+  uint32_t broadcast = cidr_broadcast(block);
+
+  /* /31 (RFC 3021) and /32 have no broadcast address to skip. */
+  return clamp_prefix(block.prefix) >= 31 ? broadcast : broadcast - 1u;
+}
+
+uint64_t cidr_host_count(cidr_t block)
+{
+  unsigned p = clamp_prefix(block.prefix);
+
+  if (p == 32)
+  {
+    return 1;
+  }
+  if (p == 31)
+  {
+    return 2;
+  }
+  /* 2^32 for a /0 needs 33 bits, so do the arithmetic in 64. */
+  return ((uint64_t)1 << (32u - p)) - 2u;
+}
+
+bool cidr_contains(cidr_t block, uint32_t addr)
+{
+  uint32_t mask = cidr_mask(block.prefix);
+
+  return (addr & mask) == (block.addr & mask);
+}
+
+bool cidr_is_network(cidr_t block)
+{
+  return (block.addr & ~cidr_mask(block.prefix)) == 0;
+}
+
+bool cidr_subnet(cidr_t block, uint32_t n, uint32_t i, cidr_t *out)
+{
+  unsigned p = clamp_prefix(block.prefix);
+  unsigned bits = 0;
+  unsigned new_prefix;
+  uint64_t size;
+
+  if (out == NULL || !cidr_is_network(block) || n == 0 || (n & (n - 1u)) != 0 ||
+      i >= n)
+  {
+    return false;
+  }
+  /* n is a power of two, so this finds log2(n): the bits borrowed from the host part. */
+  while (((uint64_t)1 << bits) < n)
+  {
+    bits++;
+  }
+  if (p + bits > 32)
+  {
+    return false;
+  }
+  new_prefix = p + bits;
+  /* A /0 subnet (n == 1 of a /0) holds 2^32 addresses, so the size is 64 bit. */
+  size = (uint64_t)1 << (32u - new_prefix);
+  out->addr = cidr_network(block) + (uint32_t)((uint64_t)i * size);
+  out->prefix = (uint8_t)new_prefix;
+  return true;
+}
