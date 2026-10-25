@@ -35,7 +35,21 @@ and I picked one:
 
 ## Experience
 
-TODO (Jake): Describe your experience with the project (struggles, breakthroughs, etc.).
+I think that throughout this semester focusing on the AI first work flow for this class has really helped me understand the steps
+required to make said workflow successful in a project like this! From the start I think my understanding of how to prompt my
+agents and how to set up the tasks has improved leading to gains in both speed and effectiveness of my AI first work flows.
+One funny bug I had was when I misspelled my name in my email when telling claude what to put in the header of things and it then assumed
+that my email was correct and my normal name was not correct leading to a couple corrections having to be made to the plan. I also think that
+I need to find a better way to manage the open shell windows I have while working in PowerShell on windows since I currently just have all the
+seperate windows I use floating around my screen which causes then to be hidden behind other screen elements when I click around to do separate
+work. I am sure there are plenty of solutions to this problem. I just need to spend the time to set one up. This task also showed me that there
+are a lot of things I do before I get into sessions the exact same way every time, like giving the model context around what it will be building,
+context on my system and how its set up, and some of the baseline rules I would like it to follow. I think that I should look into creating skills
+to feed into my agents that give it a lot of the pre canned copy paste kind of instructions up front which will save me time and help me get a model
+to give me more consistent results compared to what it was giving me before. Overall I thought this was a great project and as we continue to
+develop things in this AI first way throughout this class I continue to find new and interesting side projects and tasks that I want to dive in
+apart from classwork to make this approach as effective as possible at helping me learn and grow as a professional in important ways and at a speed
+that would not have been possible before this technology existed.
 
 ## Design
 
